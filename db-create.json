@@ -1,0 +1,93 @@
+{
+  "tables": [
+    {
+      "name": "exercises",
+      "columns": [
+        {
+          "column_name": "id",
+          "data_type": "integer",
+          "character_maximum_length": null,
+          "is_nullable": "NO",
+          "constraints": ["PRIMARY KEY"]
+        },
+        {
+          "column_name": "name",
+          "data_type": "text",
+          "character_maximum_length": null,
+          "is_nullable": "NO"
+        },
+        {
+          "column_name": "muscle_group_id",
+          "data_type": "integer",
+          "character_maximum_length": null,
+          "is_nullable": "NO",
+          "constraints": ["FOREIGN KEY"]
+        },
+        {
+          "column_name": "recommend_flag",
+          "data_type": "boolean",
+          "character_maximum_length": null,
+          "is_nullable": "YES",
+          "default_value": "TRUE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_exercises_muscle_group",
+          "columns": ["muscle_group_id"]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": ["muscle_group_id"],
+          "reference_table": "muscle_groups",
+          "reference_columns": ["id"]
+        }
+      ]
+    },
+    {
+      "name": "muscle_groups",
+      "columns": [
+        {
+          "column_name": "id",
+          "data_type": "integer",
+          "character_maximum_length": null,
+          "is_nullable": "NO"
+        },
+        {
+          "column_name": "name",
+          "data_type": "character varying",
+          "character_maximum_length": 50,
+          "is_nullable": "NO"
+        }
+      ],
+      "indexes": [],
+      "foreign_keys": []
+    },
+    {
+      "name": "workouts",
+      "columns": [
+        {
+          "column_name": "id",
+          "data_type": "integer",
+          "character_maximum_length": null,
+          "is_nullable": "NO"
+        },
+        {
+          "column_name": "date",
+          "data_type": "date",
+          "character_maximum_length": null,
+          "is_nullable": "NO"
+        },
+        {
+          "column_name": "exercise_ids",
+          "data_type": "ARRAY",
+          "character_maximum_length": null,
+          "is_nullable": "NO"
+        }
+      ],
+      "indexes": [],
+      "foreign_keys": []
+    }
+  ]
+}

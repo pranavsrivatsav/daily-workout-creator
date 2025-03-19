@@ -1,86 +1,76 @@
 const express = require("express");
 const { Pool } = require("pg");
+const { exec } = require("child_process");
 
 // Database configuration
 const pool = new Pool({
   connectionString:
-    "<postgresurl>",
+    "postgresql://postgres.mmkarhkguxkmkvxxktjc:kd9ba2SNr4Ts2iXo@aws-0-ap-south-1.pooler.supabase.com:5432/postgres",
 });
 
 // Database queries
 const queries = {
-  getRecentWorkouts: `
-    SELECT mg.name as muscle_group, COUNT(*) as count, MAX(w.workout_date) as last_performed
-    FROM WorkoutExercises we
-    JOIN Workouts w ON we.workout_id = w.id
-    JOIN Exercises e ON we.exercise_id = e.id
-    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
-    WHERE w.workout_date >= (
-      SELECT MIN(workout_date) 
-      FROM (SELECT workout_date FROM Workouts ORDER BY workout_date DESC LIMIT 10) AS last_eight
-    )
-    GROUP BY mg.name
-    ORDER BY count ASC, last_performed ASC
+  muscleGroupOrderedByFrequency: `
+    select count(*) count, rewd.muscle_group_id  from recent_exercise_workout_dates rewd 
+    where rewd.recent_workout_date  > (SELECT CURRENT_DATE - INTERVAL '30 days')
+    group by muscle_group_id
+    order by count asc
   `,
-  
-  getRecentWorkoutExercises: `
-    SELECT we.exercise_id, mg.name as muscle_group 
-    FROM WorkoutExercises we
-    JOIN Exercises e ON we.exercise_id = e.id
-    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
-    WHERE we.workout_id IN (SELECT id FROM Workouts ORDER BY workout_date DESC LIMIT 1)
+  leastRecentlyPerformedExercisesByMuscleGroup: `
+    SELECT DISTINCT ON (muscle_group_id) * 
+    FROM recent_exercise_workout_dates 
+    WHERE muscle_group_id IN (SELECT id from musclegroups)  
+    and recommend_flag = true
+    ORDER BY muscle_group_id, recent_workout_date ASC;
   `,
-
-  getExercisesByMuscleGroups: `
-    WITH RankedExercises AS (
-      SELECT 
-        e.id, 
-        e.name, 
-        mg.name as muscle_group,
-        COALESCE(MAX(el.performed_at), '1970-01-01') AS last_performed,
-        ROW_NUMBER() OVER (PARTITION BY mg.name ORDER BY COALESCE(MAX(el.performed_at), '1970-01-01') ASC) AS rank
-      FROM Exercises e
-      JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
-      LEFT JOIN ExerciseLogs el ON e.id = el.exercise_id
-      WHERE mg.name = ANY($1::text[])
-      AND e.id NOT IN (
-        SELECT exercise_id 
-        FROM WorkoutExercises we
-        WHERE workout_id IN (SELECT id FROM Workouts ORDER BY workout_date DESC LIMIT 1)
-      )
-      GROUP BY e.id, mg.name
-    )
-    SELECT id, name, muscle_group, last_performed
-    FROM RankedExercises
-    WHERE rank = 1
-  `,
-
-  insertWorkout: "INSERT INTO Workouts (workout_date, start_time, duration) VALUES ($1, $2, $3) RETURNING id",
-  insertWorkoutExercise: "INSERT INTO WorkoutExercises (workout_id, exercise_id) VALUES ($1, $2)",
-  getWorkoutById: "SELECT * FROM Workouts WHERE id = $1",
-  getWorkoutExercises: `
-    SELECT e.*, mg.name as muscle_group 
+  getAllExercises: `
+    SELECT e.name as exercise_name, e.id as exercise_id, mg.name as muscle_group_name, mg.id as muscle_group_id 
     FROM Exercises e 
-    INNER JOIN WorkoutExercises we ON e.id = we.exercise_id 
-    INNER JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
-    WHERE we.workout_id = $1
+    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id 
+    ORDER BY mg.name, e.name
   `,
-  getAllWorkouts: "SELECT * FROM Workouts ORDER BY workout_date DESC"
+  getAllExercisesByMuscleGroup:
+    "SELECT * FROM Exercises WHERE muscle_group_id = $1",
+  getAllMuscleGroups: "SELECT * FROM MuscleGroups",
+  createWorkout:
+    "INSERT INTO Workouts (date, exercise_ids) VALUES ($1, $2) RETURNING id",
+  getWorkouts: `
+    SELECT w.id as workout_id,TO_CHAR(w.date AT TIME ZONE 'UTC', 'DD-MON-YYYY') as date, 
+    json_agg(
+      json_build_object(
+        'exercise_id', e.id, 
+        'exercise_name', e.name, 
+        'muscle_group_name', mg.name
+      )
+    ) as exercises
+    FROM Workouts w
+    JOIN Exercises e ON e.id = ANY(w.exercise_ids)
+    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
+    GROUP BY w.id
+    ORDER BY w.date DESC
+  `,
+  searchExercises: `
+    SELECT e.name as exercise_name, e.id as exercise_id, mg.name as muscle_group_name, mg.id as muscle_group_id
+    FROM Exercises e
+    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
+    WHERE e.name ILIKE $1
+    ORDER BY mg.name, e.name
+  `,
 };
 
 // Input validation middleware
 const validateWorkoutInput = (req, res, next) => {
-  const { workout_date, start_time, duration, exercises } = req.body;
-  
-  if (!workout_date || !exercises) {
-    return res.status(400).json({ 
-      error: "Missing required fields: workout_date, start_time, duration, exercises" 
+  const { date, exercise_ids } = req.body;
+
+  if (!date || !exercise_ids) {
+    return res.status(400).json({
+      error: "Missing required fields: date, exercise_ids",
     });
   }
 
-  if (!Array.isArray(exercises) || exercises.length === 0) {
-    return res.status(400).json({ 
-      error: "Exercises must be a non-empty array" 
+  if (!Array.isArray(exercise_ids) || exercise_ids.length === 0) {
+    return res.status(400).json({
+      error: "exercise_ids must be a non-empty array",
     });
   }
 
@@ -90,37 +80,28 @@ const validateWorkoutInput = (req, res, next) => {
 // Error handling middleware
 const errorHandler = (err, req, res, next) => {
   console.error(err);
-  res.status(500).json({ 
+  res.status(500).json({
     error: "An internal server error occurred",
-    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    details: process.env.NODE_ENV === "development" ? err.message : undefined,
   });
 };
 
 const app = express();
 app.use(express.json());
 
-// Get daily workout plan
-app.get("/workout", async (req, res, next) => {
+// Get a list of exercises by muscle group id query parameter
+app.get("/exercises", async (req, res, next) => {
+  const { muscleGroupId } = req.query;
+
   try {
-    const recentWorkouts = await pool.query(queries.getRecentWorkouts);
-    const recentWorkoutExercises = await pool.query(queries.getRecentWorkoutExercises);
-
-    let selectedMuscleGroups = recentWorkouts.rows.map(row => row.muscle_group);
-    
-    // Filter out blocked muscle groups
-    const blockConsecutiveMuscleGroups = ["Cardio/Lower Body"];
-    const blockedMuscleGroups = recentWorkoutExercises.rows
-      .filter(row => blockConsecutiveMuscleGroups.includes(row.muscle_group))
-      .map(exercise => exercise.muscle_group);
-
-    selectedMuscleGroups = selectedMuscleGroups
-      .filter(muscleGroup => !blockedMuscleGroups.includes(muscleGroup))
-      .slice(0, 4);
-
-    const exercises = await pool.query(
-      queries.getExercisesByMuscleGroups,
-      [selectedMuscleGroups]
-    );
+    let exercises;
+    if (muscleGroupId) {
+      exercises = await pool.query(queries.getAllExercisesByMuscleGroup, [
+        Number(muscleGroupId),
+      ]);
+    } else {
+      exercises = await pool.query(queries.getAllExercises);
+    }
 
     res.json(exercises.rows);
   } catch (err) {
@@ -128,54 +109,83 @@ app.get("/workout", async (req, res, next) => {
   }
 });
 
-// Log a new workout session
-app.post("/workout", validateWorkoutInput, async (req, res, next) => {
-  const { workout_date, start_time, duration, exercises } = req.body;
-  
+//Get a list of all muscle groups
+app.get("/muscle-groups", async (req, res, next) => {
   try {
-    const result = await pool.query(queries.insertWorkout, [workout_date, start_time, duration]);
-    const workoutId = result.rows[0].id;
-
-    await Promise.all(
-      exercises.map(exerciseId => 
-        pool.query(queries.insertWorkoutExercise, [workoutId, exerciseId])
-      )
-    );
-
-    res.status(201).json({ message: "Workout logged", workoutId });
+    const muscleGroups = await pool.query(queries.getAllMuscleGroups);
+    res.json(muscleGroups.rows);
   } catch (err) {
     next(err);
   }
 });
 
-// Get details of a specific workout
-app.get("/workout/:id", async (req, res, next) => {
-  const { id } = req.params;
-  
+// Generate a workout plan with optimal exercise distribution
+app.get("/generate-workout", async (req, res, next) => {
   try {
-    const [workout, exercises] = await Promise.all([
-      pool.query(queries.getWorkoutById, [id]),
-      pool.query(queries.getWorkoutExercises, [id])
-    ]);
 
-    if (!workout.rows[0]) {
-      return res.status(404).json({ error: "Workout not found" });
-    }
+    // muscle groups sorted by frequency (least to most frequent)
+    const sortedMuscleGroups = (await pool.query(queries.muscleGroupOrderedByFrequency)).rows.map(
+      (row) => row.muscle_group_id
+    );
+    // Select top 5 least used muscle groups
+    const selectedMuscleGroups = sortedMuscleGroups.slice(0, 5);
 
-    res.json({ 
-      workout: workout.rows[0], 
-      exercises: exercises.rows 
+    const leastRecentlyPerformedExerciseForEachMuscleGroup = (
+      await pool.query(queries.leastRecentlyPerformedExercisesByMuscleGroup)
+    ).rows;
+
+    const selectedExercises = selectedMuscleGroups.map((muscleGroupId) => {
+      const exercise = leastRecentlyPerformedExerciseForEachMuscleGroup.find(
+        (exercise) => exercise.muscle_group_id === muscleGroupId
+      );
+      return exercise;
+    });
+
+
+    res.json({
+      date: new Date().toISOString().split("T")[0],
+      exercises: selectedExercises,
     });
   } catch (err) {
     next(err);
   }
 });
 
-// Get a list of past workouts
+// Create a new workout
+app.post("/workouts", validateWorkoutInput, async (req, res, next) => {
+  const { date, exercise_ids } = req.body;
+
+  try {
+    const result = await pool.query(queries.createWorkout, [
+      date,
+      exercise_ids,
+    ]);
+    res.status(201).json({
+      id: result.rows[0].id,
+      message: "Workout created successfully",
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get all workouts
 app.get("/workouts", async (req, res, next) => {
   try {
-    const workouts = await pool.query(queries.getAllWorkouts);
+    const workouts = await pool.query(queries.getWorkouts);
     res.json(workouts.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+//search for exercises
+app.get("/search-exercises", async (req, res, next) => {
+  const { name } = req.query;
+  console.log(name);
+  try {
+    const exercises = await pool.query(queries.searchExercises, [`%${name}%`]);
+    res.json(exercises.rows);
   } catch (err) {
     next(err);
   }
@@ -184,8 +194,8 @@ app.get("/workouts", async (req, res, next) => {
 // Error handling middleware should be last
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 8000;
+const server = app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 
