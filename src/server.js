@@ -1,6 +1,7 @@
 const express = require("express");
 const { Pool } = require("pg");
 const { exec } = require("child_process");
+const moment = require("moment");
 
 // Database configuration
 const pool = new Pool({
@@ -122,29 +123,43 @@ app.get("/muscle-groups", async (req, res, next) => {
 // Generate a workout plan with optimal exercise distribution
 app.get("/generate-workout", async (req, res, next) => {
   try {
-
+    let exerciseCount = Number(req.query.exerciseCount) || 4;
     // muscle groups sorted by frequency (least to most frequent)
     const sortedMuscleGroups = (await pool.query(queries.muscleGroupOrderedByFrequency)).rows.map(
       (row) => row.muscle_group_id
     );
-    // Select top 5 least used muscle groups
-    const selectedMuscleGroups = sortedMuscleGroups.slice(0, 5);
 
     const leastRecentlyPerformedExerciseForEachMuscleGroup = (
       await pool.query(queries.leastRecentlyPerformedExercisesByMuscleGroup)
     ).rows;
 
-    const selectedExercises = selectedMuscleGroups.map((muscleGroupId) => {
+    let selectedExercises = sortedMuscleGroups.map((muscleGroupId) => {
       const exercise = leastRecentlyPerformedExerciseForEachMuscleGroup.find(
         (exercise) => exercise.muscle_group_id === muscleGroupId
       );
       return exercise;
     });
 
+    //filter out exercises where the key recent_workout_date done within last 2 days
+    selectedExercises = selectedExercises.filter(
+      (exercise) => {
+        if(exercise.recent_workout_date === null)
+            return true
+        
+        const recent_workout_date = moment(exercise.recent_workout_date)
+        return Math.abs(recent_workout_date.diff(moment(), 'days')) > 2
+      }
+        
+    );
+
+    //slice out 4 exercises from the selected exercises
+    selectedExercises = selectedExercises.slice(0, exerciseCount);
+    const selectedExerciseIds = selectedExercises.map((exercise) => exercise.id);
 
     res.json({
       date: new Date().toISOString().split("T")[0],
       exercises: selectedExercises,
+      exercise_ids: selectedExerciseIds,
     });
   } catch (err) {
     next(err);
@@ -182,7 +197,6 @@ app.get("/workouts", async (req, res, next) => {
 //search for exercises
 app.get("/search-exercises", async (req, res, next) => {
   const { name } = req.query;
-  console.log(name);
   try {
     const exercises = await pool.query(queries.searchExercises, [`%${name}%`]);
     res.json(exercises.rows);
