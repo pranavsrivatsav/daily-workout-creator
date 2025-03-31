@@ -11,12 +11,12 @@ const pool = new Pool({
 
 // Database queries
 const queries = {
-  muscleGroupOrderedByFrequency: `
-    select count(*) count, rewd.muscle_group_id  from recent_exercise_workout_dates rewd 
-    where rewd.recent_workout_date  > (SELECT CURRENT_DATE - INTERVAL '30 days')
-    group by muscle_group_id
-    order by count asc
-  `,
+  // muscleGroupOrderedByFrequency: `
+  //   select count(*) count, rewd.muscle_group_id  from recent_exercise_workout_dates rewd 
+  //   where rewd.recent_workout_date  > (SELECT CURRENT_DATE - INTERVAL '30 days')
+  //   group by muscle_group_id
+  //   order by count asc
+  // `,
   leastRecentlyPerformedExercisesByMuscleGroup: `
     SELECT DISTINCT ON (muscle_group_id) * 
     FROM recent_exercise_workout_dates 
@@ -47,6 +47,23 @@ const queries = {
     FROM Workouts w
     JOIN Exercises e ON e.id = ANY(w.exercise_ids)
     JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
+    GROUP BY w.id
+    ORDER BY w.date DESC
+  `,
+  getWorkoutsOfLastXDays: `
+    SELECT w.id as workout_id,TO_CHAR(w.date AT TIME ZONE 'UTC', 'DD-MON-YYYY') as date,  
+    json_agg(
+      json_build_object(
+        'exercise_id', e.id, 
+        'exercise_name', e.name, 
+        'muscle_group_name', mg.name,
+        'muscle_group_id', mg.id
+      )
+    ) as exercises
+    FROM Workouts w
+    JOIN Exercises e ON e.id = ANY(w.exercise_ids)
+    JOIN MuscleGroups mg ON e.muscle_group_id = mg.id
+    WHERE w.date > (CURRENT_DATE - INTERVAL '1 day' * $1)
     GROUP BY w.id
     ORDER BY w.date DESC
   `,
@@ -124,11 +141,46 @@ app.get("/muscle-groups", async (req, res, next) => {
 app.get("/generate-workout", async (req, res, next) => {
   try {
     let exerciseCount = Number(req.query.exerciseCount) || 4;
-    // muscle groups sorted by frequency (least to most frequent)
-    const sortedMuscleGroups = (await pool.query(queries.muscleGroupOrderedByFrequency)).rows.map(
-      (row) => row.muscle_group_id
+    
+    //get workouts of last 30 days
+    const recentWorkouts = await pool.query(queries.getWorkoutsOfLastXDays, [
+      30,
+    ]);
+    //get all muscle groups
+    const muscleGroups = await pool.query(queries.getAllMuscleGroups);
+
+    //initialize an object with keys being muscle group ids and values being the count of exercises in the last 30 days
+    const muscleGroupExerciseCount = {};
+    muscleGroups.rows.forEach((muscleGroup) => {
+      muscleGroupExerciseCount[muscleGroup.id] = 0;
+    });
+
+    //create an object with keys being muscle group ids and values being the count of exercises in the last 30 days
+    recentWorkouts.rows.forEach((workout) => {
+      workout.exercises.forEach((exercise) => {
+        const muscleGroupId = String(exercise.muscle_group_id);
+        if (!muscleGroupExerciseCount[muscleGroupId]) {
+          muscleGroupExerciseCount[muscleGroupId] = 0;
+        }
+        muscleGroupExerciseCount[muscleGroupId]++;
+      });
+    });
+
+    //sort muscle groups by frequency of exercises in the last 30 days
+    let sortedMuscleGroups = Object.keys(muscleGroupExerciseCount).sort(
+      (a, b) => {
+        return (
+          muscleGroupExerciseCount[a] - muscleGroupExerciseCount[b]
+        );
+      }
     );
 
+    //convert sorted muscle groups to numbers
+    sortedMuscleGroups = sortedMuscleGroups.map((id) =>
+      Number(id)
+    );
+
+    //get least recently performed exercise for each muscle group
     const leastRecentlyPerformedExerciseForEachMuscleGroup = (
       await pool.query(queries.leastRecentlyPerformedExercisesByMuscleGroup)
     ).rows;
@@ -156,10 +208,25 @@ app.get("/generate-workout", async (req, res, next) => {
     selectedExercises = selectedExercises.slice(0, exerciseCount);
     const selectedExerciseIds = selectedExercises.map((exercise) => exercise.id);
 
+    //create an array of objects ordered by muscle group count
+    // and the object should have muscle group id, muscle group name and count of exercises done for that muscle group
+
+    const muscleGroupCount = Object.keys(muscleGroupExerciseCount).map(
+      (muscleGroupId) => {
+        return {
+          muscle_group_id: muscleGroupId,
+          muscle_group_name: muscleGroups.rows.find(
+            (muscleGroup) => muscleGroup.id === Number(muscleGroupId)
+          ).name,
+          count: muscleGroupExerciseCount[muscleGroupId],
+        };
+      }
+    );
     res.json({
       date: new Date().toISOString().split("T")[0],
       exercises: selectedExercises,
       exercise_ids: selectedExerciseIds,
+      muscleGroupCount
     });
   } catch (err) {
     next(err);
@@ -188,6 +255,18 @@ app.post("/workouts", validateWorkoutInput, async (req, res, next) => {
 app.get("/workouts", async (req, res, next) => {
   try {
     const workouts = await pool.query(queries.getWorkouts);
+    res.json(workouts.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+//Get workouts of last 30 days
+app.get("/workouts/last-30-days", async (req, res, next) => {
+  try {
+    const workouts = await pool.query(queries.getWorkoutsOfLastXDays, [
+      30,
+    ]);
     res.json(workouts.rows);
   } catch (err) {
     next(err);
