@@ -2,6 +2,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const { exec } = require("child_process");
 const moment = require("moment");
+const cors = require("cors");
 
 // Database configuration
 const pool = new Pool({
@@ -105,6 +106,7 @@ const errorHandler = (err, req, res, next) => {
 };
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 // Get a list of exercises by muscle group id query parameter
@@ -288,8 +290,6 @@ app.get("/search-exercises", async (req, res, next) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 8000;
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-
-module.exports = app;
